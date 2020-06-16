@@ -1,3 +1,5 @@
+import collections
+import tqdm
 import logging
 logging.basicConfig(format="%(asctime)s %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,6 +19,7 @@ from models import GNNpred
 from utils import utils
 from utils import sample_random, sample_edit, sample_even
 
+from template_lib.trainer.base_trainer import summary_defaultdict2txtfig
 
 import argparse
 parser = argparse.ArgumentParser(description='GNN PerformancePrediciton')
@@ -32,25 +35,7 @@ parser.add_argument('--batch_size', type=int, default=128, help='batch size')
 parser.add_argument('--epochs', type=int,  default=100)
 parser.add_argument('--num_acc_layers', type=int, help='amount linear layer for regression', default=4)
 parser.add_argument('--learning_rate', type=float, default=0.00001)
-args=parser.parse_args()
 
-args.save = 'experiments/performance_prediction/gnn/{}/{}/sampled-{}/pred-{}'.format(
-    args.prediction_task,
-    args.sampling,
-    args.training_size,
-    time.strftime(
-        "%Y%m%d-%H%M%S"))
-utils.create_exp_dir(args.save)
-
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
-
-log_format = '%(asctime)s %(message)s'
-logging.basicConfig(stream=sys.stdout, level=logging.INFO,
-                    format=log_format, datefmt='%m/%d %I:%M:%S %p')
-fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
-fh.setFormatter(logging.Formatter(log_format))
-logging.getLogger().addHandler(fh)
 
 
 sampling_methods = {
@@ -61,7 +46,7 @@ sampling_methods = {
 
 
 
-def main(args):
+def main(args, myargs):
     
     method = args.sampling
     training_size = args.training_size
@@ -74,8 +59,8 @@ def main(args):
     
     logging.info("args = %s", args)
 
-    with open('model_configs/gnn_config.json')  as json_file:
-             config = json.load(json_file)
+    with open(args.json_file)  as json_file:
+      config = json.load(json_file)
 
 
     config = {
@@ -139,27 +124,39 @@ def main(args):
     
     # Save Sampled Dataset
     filepath = os.path.join(args.save, 'sampled_dataset_{}.pth'.format(training_size))
-    torch.save(sampled_dataset, filepath)
+    # torch.save(sampled_dataset, filepath)
 
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr']) 
     
     for epoch in range(1, int(budget)+1):
         logging.info('epoch: %s', epoch)
-       
+        summary_dict = collections.defaultdict(dict)
+
         # training
         train_obj, train_results=train(train_loader, model, criterion, optimizer, config['lr'], epoch, device, 
-                                       batch_size)
+                                       batch_size, myargs=myargs)
+        summary_dict['obj']['train_obj'] = train_obj
+        summary_dict['mse']['train_mse'] = train_results['mse']
+        summary_dict['rmse']['train_rmse'] = train_results['rmse']
         logging.info('train metrics:  %s', train_results)
 
 #       validation    
-        valid_obj, valid_results = infer(val_loader, model, criterion, epoch, device, batch_size)
+        valid_obj, valid_results = infer(val_loader, model, criterion, epoch, device, batch_size, myargs=myargs)
+        summary_dict['obj']['valid_obj'] = valid_obj
+        summary_dict['mse']['valid_mse'] = valid_results['mse']
+        summary_dict['rmse']['valid_rmse'] = valid_results['rmse']
         logging.info('validation metrics:  %s', valid_results)
         
         if args.prediction_task=='interpolation':
     #       testing
-            test_obj, test_results= test(test_loader, model, criterion, device, batch_size)
+            test_obj, test_results= test(test_loader, model, criterion, device, batch_size, myargs=myargs)
+            summary_dict['obj']['test_obj'] = test_obj
+            summary_dict['mse']['test_mse'] = test_results['mse']
+            summary_dict['rmse']['test_rmse'] = test_results['rmse']
             logging.info('test metrics:  %s', test_results)
+            summary_defaultdict2txtfig(default_dict=summary_dict, prefix='vsgae', step=epoch,
+                                       textlogger=myargs.textlogger, save_fig_sec=60)
             config_dict = {
                 'epochs': args.epochs,
                 'loss': train_results["rmse"],
@@ -182,7 +179,7 @@ def main(args):
 
 
 
-def train(train_loader,model, criterion, optimizer, lr, epoch, device, batch_size):
+def train(train_loader,model, criterion, optimizer, lr, epoch, device, batch_size, myargs=None):
     objs = utils.AvgrageMeter()
     
     # TRAINING
@@ -191,7 +188,7 @@ def train(train_loader,model, criterion, optimizer, lr, epoch, device, batch_siz
         
     model.train()
 
-    for step, graph_batch in enumerate(train_loader):
+    for step, graph_batch in enumerate(tqdm.tqdm(train_loader, file=myargs.stdout)):
         graph_batch = graph_batch.to(device)
         pred = model(graph_batch=graph_batch).view(-1)
         loss = criterion(pred, (graph_batch.acc))
@@ -212,7 +209,7 @@ def train(train_loader,model, criterion, optimizer, lr, epoch, device, batch_siz
     return objs.avg, train_results
 
 
-def infer(val_loader, model, criterion, epoch, device, batch_size):
+def infer(val_loader, model, criterion, epoch, device, batch_size, myargs=None):
     objs = utils.AvgrageMeter()
 
     # VALIDATION
@@ -221,7 +218,7 @@ def infer(val_loader, model, criterion, epoch, device, batch_size):
 
     model.eval()
         
-    for step, graph_batch in enumerate(val_loader):
+    for step, graph_batch in enumerate(tqdm.tqdm(val_loader, file=myargs.stdout)):
         graph_batch = graph_batch.to(device)
         pred = model(graph_batch=graph_batch).view(-1)
         loss = criterion(pred, (graph_batch.acc))
@@ -238,14 +235,14 @@ def infer(val_loader, model, criterion, epoch, device, batch_size):
     return objs.avg, val_results
 
 
-def test(test_loader, model, criterion, device, batch_size):
+def test(test_loader, model, criterion, device, batch_size, myargs=None):
     objs = utils.AvgrageMeter()
     preds = []
     targets = []
     
     model.eval()
      
-    for step, graph_batch in enumerate(test_loader):
+    for step, graph_batch in enumerate(tqdm.tqdm(test_loader, file=myargs.stdout)):
         graph_batch = graph_batch.to(device)
         pred = model(graph_batch=graph_batch).view(-1)
         loss = criterion(pred, (graph_batch.acc))
@@ -263,6 +260,34 @@ def test(test_loader, model, criterion, device, batch_size):
  
 
     
+def run(argv_str=None):
+  from template_lib.utils.config import parse_args_and_setup_myargs, config2args
+  from template_lib.utils.modelarts_utils import prepare_dataset
+  run_script = os.path.relpath(__file__, os.getcwd())
+  args1, myargs, _ = parse_args_and_setup_myargs(argv_str, run_script=run_script, start_tb=False)
+  myargs.args = args1
+  myargs.config = getattr(myargs.config, args1.command)
+
+  if hasattr(myargs.config, 'datasets'):
+    prepare_dataset(myargs.config.datasets, cfg=myargs.config)
+
+  args = parser.parse_args([])
+  args = config2args(myargs.config.args, args)
+
+  args.save = os.path.join(args1.outdir, f'{args.sampling}_sampled_{args.training_size}')
+  utils.create_exp_dir(args.save)
+
+  for handler in logging.root.handlers[:]:
+      logging.root.removeHandler(handler)
+
+  log_format = '%(asctime)s %(message)s'
+  logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+                      format=log_format, datefmt='%m/%d %I:%M:%S %p')
+  fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
+  fh.setFormatter(logging.Formatter(log_format))
+  logging.getLogger().addHandler(fh)
+
+  main(args, myargs)
+
 if __name__ == '__main__':
-    main(args)
-    
+  run()

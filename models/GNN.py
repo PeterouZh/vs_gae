@@ -1,5 +1,5 @@
 import numpy as np
-import igraph
+# import igraph
 import torch
 import pdb
 

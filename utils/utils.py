@@ -8,7 +8,7 @@ import torch
 from torch_geometric.data import Data, DataLoader
 from torch.utils.data import DataLoader as BatchLoader
 
-import igraph
+# import igraph
 import pygraphviz as pgv
 from PIL import Image
 
