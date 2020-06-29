@@ -7,8 +7,8 @@ https://github.com/muhanzhang/D-VAE
 
 
 import logging
-logging.basicConfig(format="%(asctime)s %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
+# logging.basicConfig(format="%(asctime)s %(levelname)s - %(message)s", level=logging.INFO)
+# logger = logging.getLogger(__name__)
 import pdb
 import numpy as np
 import networkx as nx
@@ -36,6 +36,9 @@ from utils import DecLoader, prep_data
 from utils import data_to_longtensor
 from utils import prep_data, batch2graph
 
+from template_lib.trainer.base_trainer import summary_dict2txtfig
+
+
 import argparse
 parser = argparse.ArgumentParser(description=' GNN Graphautoencoder-training')
 parser.add_argument('--model', type=str, default='GNN-VSGAE')
@@ -54,33 +57,33 @@ parser.add_argument('--comments', type=str, default='')
 parser.add_argument('--default', action='store_true', default=False, help='if True, use values from args')
 parser.add_argument('--test', action='store_true', default=False, help='Testing the VAE on Autoencoding Ability with test data')
 
-args=parser.parse_args()
+# args=parser.parse_args()
 
-args.save = 'experiments/VAE/vae-{}'.format(
-    time.strftime(
-        "%Y%m%d-%H%M%S"))
-utils.create_exp_dir(args.save)
+# args.save = 'experiments/VAE/vae-{}'.format(
+#     time.strftime(
+#         "%Y%m%d-%H%M%S"))
+# utils.create_exp_dir(args.save)
 
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
+# for handler in logging.root.handlers[:]:
+#     logging.root.removeHandler(handler)
+#
+# log_format = '%(asctime)s %(message)s'
+# logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+#                     format=log_format, datefmt='%m/%d %I:%M:%S %p')
+# fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
+# fh.setFormatter(logging.Formatter(log_format))
+# logging.getLogger().addHandler(fh)
 
-log_format = '%(asctime)s %(message)s'
-logging.basicConfig(stream=sys.stdout, level=logging.INFO,
-                    format=log_format, datefmt='%m/%d %I:%M:%S %p')
-fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
-fh.setFormatter(logging.Formatter(log_format))
-logging.getLogger().addHandler(fh)
 
 
-
-def main(args):
-
+def main(args, myargs):
+    logger = myargs.logger
     device = torch.device('cuda')
     
     logging.info("args = %s", args)
     #Load Model Configs
     if not args.default:
-        with open('model_configs/gnn_config.json')  as json_file:
+        with open(args.json_file)  as json_file:
             config = json.load(json_file)
 
         config = {
@@ -136,19 +139,24 @@ def main(args):
     logging.info('Prep Train Dataset {}'. format(args.train_data))
     train_data=args.train_data
     max_num_nodes = 7
-    train_set = prep_data(train_data, max_num_nodes=max_num_nodes, training=True)  
+    train_set = prep_data(train_data, max_num_nodes=max_num_nodes, training=True)
 
-    
+    if args.num_samples is not None:
+        train_set = train_set[:args.num_samples]
+
     logger.info('start training {}'. format(args.model))
 
     for epoch in range(1, int(budget)+1):
         logging.info('epoch: %s', epoch)
+        summary_d = {}
        
         # training
-        train_obj=train(train_set, model, optimizer, config['learning_rate'], epoch, device, batch_size)
+        train_obj=train(train_set, model, optimizer, config['learning_rate'], epoch, device, batch_size, myargs=myargs)
         scheduler.step(train_obj)
-            
-            
+        summary_d['loss'] = train_obj
+
+        summary_dict2txtfig(summary_d, prefix='train', step=epoch, textlogger=myargs.textlogger, save_fig_sec=60)
+
         # Save the model
         if epoch % args.save_interval == 0:
             logger.info('save model checkpoint {}  '.format(epoch))
@@ -190,7 +198,8 @@ def main(args):
         logger.info('Run: Train Dataset for Validity Tests {}'.format(args.train_data))
 
         logger.info('Extract mean and std of latent space ')
-        save_latent_representations(epoch, train_set, test_set, model ,state_dict, 1, device, data_name='nas101')
+        save_latent_representations(epoch, train_set, test_set, model ,state_dict, 1, device, data_name='nas101',
+                                    args=args)
 
 
         batch_size=2048
@@ -218,14 +227,15 @@ def main(args):
             file.write('\n')            
 
 
-def train(train_loader,model, optimizer, lr, epoch, device, batch_size):
+def train(train_loader,model, optimizer, lr, epoch, device, batch_size, myargs):
     objs = utils.AvgrageMeter()
     
     # TRAINING
         
     model.train()
       
-    for step,graph_batch in enumerate(DecLoader(train_loader, batch_size, shuffle=True, device=device)):
+    pbar = tqdm(DecLoader(train_loader, batch_size, shuffle=True, device=device), file=myargs.stdout)
+    for step,graph_batch in enumerate(pbar):
         loss = model(graph_batch)
         optimizer.zero_grad()
         loss.backward()
@@ -347,7 +357,8 @@ def extract_latent(train_data, model, state_dict, infer_batch_size, device):
     return np.concatenate(Z, 0), torch.cat(Y,0).numpy()
 
 
-def save_latent_representations(epoch, train_data, test_data, model ,state_dict, infer_batch_size, device, data_name):
+def save_latent_representations(epoch, train_data, test_data, model ,state_dict, infer_batch_size, device, data_name,
+                                args):
     Z_train, Y_train = extract_latent(train_data, model, state_dict, infer_batch_size, device)
     Z_test, Y_test = extract_latent(test_data, model, state_dict, infer_batch_size, device)
     latent_pkl_name = os.path.join(args.save,  data_name+
@@ -448,7 +459,36 @@ def prior_validity(train_data,test_data, model, state_dict , Z_train , n_latent_
     return r_valid, r_unique, r_novel
 
 
-    
+def run(argv_str=None):
+  from template_lib.utils.config import parse_args_and_setup_myargs, config2args
+  from template_lib.utils.modelarts_utils import prepare_dataset
+  run_script = os.path.relpath(__file__, os.getcwd())
+  args1, myargs, _ = parse_args_and_setup_myargs(argv_str, run_script=run_script, start_tb=False)
+  myargs.args = args1
+  myargs.config = getattr(myargs.config, args1.command)
+
+  if hasattr(myargs.config, 'datasets'):
+    prepare_dataset(myargs.config.datasets, cfg=myargs.config)
+
+  args = parser.parse_args([])
+  args = config2args(myargs.config.args, args)
+
+  args.save = os.path.join(args1.outdir, f'vae')
+  utils.create_exp_dir(args.save)
+
+  for handler in logging.root.handlers[:]:
+      logging.root.removeHandler(handler)
+
+  log_format = '%(asctime)s %(message)s'
+  logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+                      format=log_format, datefmt='%m/%d %I:%M:%S %p')
+  fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
+  fh.setFormatter(logging.Formatter(log_format))
+  logging.getLogger().addHandler(fh)
+
+  main(args, myargs)
+
 if __name__ == '__main__':
-    main(args)
-    
+  run()
+  from template_lib.examples import test_bash
+  test_bash.TestingUnit().test_resnet(gpu=os.environ['CUDA_VISIBLE_DEVICES'])

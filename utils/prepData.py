@@ -85,8 +85,8 @@ def prep_data(data_path, max_num_nodes=None, training=False, aggr='sum', device=
         else:
             device = torch.device(device)
             data_list = list()
-            data=torch.load(data_path)
-            for graph in data:
+            data_loaded=torch.load(data_path)
+            for graph in data_loaded:
                 edges, edge_list =get_edges(graph.edge_index.numpy().transpose(),max_num_nodes)
                 edge_list_list = get_edge_list_list(edge_list, max_num_nodes)
                 node_atts=graph.node_atts.numpy()
